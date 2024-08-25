@@ -5,7 +5,7 @@ use nix::sys::select;
 use nix::sys::stat::Mode;
 use nix::unistd::mkfifo;
 use std::fs::File;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::os::fd::AsFd;
 use std::os::fd::FromRawFd;
 use std::process;
@@ -13,7 +13,7 @@ use std::process;
 const TO_AGENT: &str = "/home/abentley/mindy/to-agent";
 const FROM_AGENT: &str = "/home/abentley/mindy/from-agent";
 
-fn become_agent() {
+fn become_agent(mut cache: CachedValue) {
     let stdout = File::create("stdout-1").unwrap();
     let stderr = File::create("stderr-1").unwrap();
     eprintln!("Daemonizing");
@@ -29,7 +29,7 @@ fn become_agent() {
         let in_fifo = match fcntl::open(TO_AGENT, fcntl::OFlag::O_NONBLOCK, Mode::all()) {
             Ok(x) => x,
             Err(error) => {
-                panic!("Could not open myfife: {}", error)
+                panic!("Could not open in_fifo: {}", error)
             }
         };
         let mut fds = select::FdSet::new();
@@ -50,7 +50,10 @@ fn become_agent() {
         select::select(None, &mut fds, None, None, None).unwrap();
         eprintln!("Reading from in_fifo");
         in_fifo.read_to_string(&mut line).unwrap();
-        print!("{}", line);
+        println!("{}", line);
+        println!("{}", cache.get_value());
+        let mut out_fifo = File::options().write(true).open(FROM_AGENT).unwrap();
+        write!(out_fifo, "{}", cache.get_value()).unwrap();
         line.clear();
     }
 }
@@ -59,8 +62,30 @@ fn get_value() -> String {
     format!("{}", process::id())
 }
 
-fn get_value_with_proxy() -> String {
-    get_value()
+trait ValueProxy {
+    fn get_value(&mut self) -> String {
+        if let Some(value) = self.get_proxied_value() {
+            return value;
+        }
+        let value = get_value();
+        self.set_proxied_value(&value);
+        value
+    }
+    fn get_proxied_value(&self) -> Option<String>;
+    fn set_proxied_value(&mut self, value: &str);
+}
+
+struct CachedValue {
+    value: Option<String>,
+}
+
+impl ValueProxy for CachedValue {
+    fn get_proxied_value(&self) -> Option<String> {
+        self.value.clone()
+    }
+    fn set_proxied_value(&mut self, value: &str) {
+        self.value = Some(value.to_owned());
+    }
 }
 
 fn main() {
@@ -78,6 +103,7 @@ fn main() {
             panic!("FROM_AGENT: {}", err);
         }
     }
-    println!("{}", get_value_with_proxy());
-    become_agent();
+    let mut cache = CachedValue { value: None };
+    println!("{}", cache.get_value());
+    become_agent(cache);
 }
